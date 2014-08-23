@@ -1,0 +1,110 @@
+Project in Practical Machine Learning
+========================================================
+
+<h1>Introduction</h1>
+The goal of this project is to use data from accelerometers on the belt, forearm, arm, and dumbbell of 6 participants to quantify how well they are doing a particular activity. This will be accomplished by training a prediction model on the accelerometer data. The algorithm that I will be using for this exercise will be a random forest classifier.
+
+The first step is to load in the training data and subset it into a training and a testing set. I am sub-setting the training data to create an additional test set because I want to have a separate testing set that will give an unbiased estimate of the prediction model before the model has to classify on the actual test set.
+
+The Caret package will be used for data subsetting, training and cross-validation of the model.
+
+```{r}
+# Setup
+library(caret)
+library(randomForest)
+# Global training data
+training <- read.csv("pml-training.csv", header = TRUE, na.strings=c("", "NA", "NULL"))
+
+# remove the first 8 columns as those are just 'house keeping' columns for
+# the data
+training2 <- training[, -seq(from = 1, to = 8, by = 1)]
+
+# seed random # gen for subsetting
+set.seed(9999)
+
+# test subset: 40% of global training data
+inTest <- createDataPartition(y = training2$classe, p = 0.4, list = F)
+testSub <- training2[inTest, ]
+
+# training subset: 60% of global training data
+trainingSub <- training2[-inTest, ]
+```
+
+<h1>Filtering variates that have many missing values</h1>
+The training data consists of 152 variables (excluding the first 8 from the original 160), but many of the variables are sparse, meaning that they only have observations for a few of the data points. These sparse variables may have predictive value, but because they are observed so infrequently they become fairly useless for classifying most of the data points that do not contain these observations. Therefore it makes sense to filter these inputs out and focus the prediction efforts on variables that have at least 90% of their observations filled in.
+
+```{r}
+# function for determining sparseness of variables
+sparseness <- function(a) {
+    n <- length(a)
+    na.count <- sum(is.na(a))
+    return((n - na.count)/n)
+}
+
+# sparness of input variables based on training subset
+variable.sparseness <- apply(trainingSub, 2, sparseness)
+
+# trim down the subs by removing sparse variables
+trimTrainSub <- trainingSub[, variable.sparseness > 0.9]
+```
+
+<h1>Choosing the prediction algorithm</h1>
+The predictor we will use for this classification problem is a random forest, due to the following reasons:
+
+* A random forest has a built in cross-validation component that gives an unbiased estimate of the forest's out-of-sample (OOB) error rate. This OOB error rate can be helpful in tuning the forest's parameters.
+* After filtering out sparse variables there are still 52 variates to work with. Random forests are particularly well suited to handle a large number of inputs, especially when the interactions between variables are unknown.
+* A random forest can be used to estimate variable importance. This is especially helpful if the goal is to trim down the inputs into a more parsimonious set.
+* Individual trees can be pulled out of the random forest and examined. This allows for decent intuition into how the predictor is arriving at its predicted classifications.
+* A random forest can handle unscaled and categorical variates, which reduces the need for cleaning and transforming variables which are steps that can be subject to overfitting and noise.
+* The random forest's classification output can be expressed as a probability (# trees w classification / total # of trees) which can be used as a confidence estimate for each classification.
+
+<h1>Using a random forest to determine input variable importance</h1>
+
+Here we will carve out 10% of the sub training data and use a random forest to determine variable importance. I will then use this information to cull out any variables that are deemed unimportant.
+
+```{r}
+inVarImp <- createDataPartition(y = trimTrainSub$classe, p = 0.1, list = F)
+varImpSub <- trimTrainSub[inVarImp, ]
+varImpSub$classe <- factor(varImpSub$classe)
+varImpRF <- randomForest(classe ~ ., data = varImpSub)
+varImpObj <- varImp(varImpRF)
+```
+
+Below are the first 20 important variables.
+
+```{r}
+varImpObj <- cbind(row.names(varImpObj), varImpObj)
+
+# Take the 20 most important variates
+varImpObj[rev(order(varImpObj$Overall)),1][1:20]
+```
+
+<h1>Building random forest predictor that applies the top 25% of variables based on their importance</h1>
+
+Let us build a random forest predictor using the remaining 90% of the training sub data set. I will use only the variables in the top 25% of importance.
+
+```{r}
+set.seed(12345)
+finalTrainingData <- trimTrainSub[-inVarImp, ]
+impThresh <- quantile(varImpObj$Overall, 0.75)
+impfilter <- varImpObj$Overall >= impThresh
+finalTrainingData <- finalTrainingData[, impfilter]
+rfModel <- randomForest(classe ~ ., data = finalTrainingData, na.action=na.omit)
+```
+
+<h1>Expectation for out-of-sample error</h1>
+The trained random forest will now use the testing sub data set to extimate the out of sample error rate. The sub data error set was originally apart of the total training set, but it was carved out and left untouched durring variable selection, training and tuning of the random forest. Therefore the testing subset should be an unbiased estimate of the random forest's prediction accuracy.
+
+```{r}
+# Apply data trimming to subdata set
+trimTestSub <- testSub[, variable.sparseness > 0.9]
+finalTestSub <- trimTestSub[, impfilter]
+prediction <- predict(rfModel, finalTestSub)
+missClass = function(values, prediction) {
+    sum(prediction != values)/length(values)
+}
+errRate = missClass(finalTestSub$classe, prediction)
+```
+
+<h1>Summary</h1>
+Based on the missclassificaiton rate on the testing subset, an unbiased estimate of the random forest's out-of-sample error rate is 1.26%.
